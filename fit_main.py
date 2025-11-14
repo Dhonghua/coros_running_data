@@ -1,8 +1,14 @@
 import os
 import pandas as pd
-import fitdecode
+# import fitdecode
 
-data_types = ["session"]#"record" ,"lap","session"
+from fit_lap import parse_fit_file_lap
+from fit_record import parse_fit_file_record
+from fit_session import parse_fit_file_session
+
+from process_columns import process_columns
+
+# data_types = ["record" ,"lap","session"]#"record" ,"lap","session"
 
 FIT_FOLDER = "./fit_files"
 CHINESE_COLUMNS = {
@@ -52,7 +58,8 @@ CHINESE_COLUMNS = {
     "power": "功率(W)",
     "accumulated_power": "累计功率(W·s)",
     "position_lat": "纬度",
-    "position_long": "经度"
+    "position_long": "经度",
+    "sub_sport" : "运动子类型"
 }
 
 def process_fit_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -80,7 +87,7 @@ def process_fit_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         例：11592.81 → 11.59
         """
         try:
-            return f"{round(meters / 1000, precision)}km" if pd.notna(meters) else None
+            return f"{round(meters / 1000, precision)}" if pd.notna(meters) else None
         except (TypeError, ValueError):
                 return None
 
@@ -91,7 +98,7 @@ def process_fit_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         例：4.405 → 15.86 km/h
         """
         try:
-            return f"{round(speed_m_s * 3.6, precision)}/h" if pd.notna(speed_m_s) else None
+            return f"{round(speed_m_s * 3.6, precision)}" if pd.notna(speed_m_s) else None
         except (TypeError, ValueError):
             return None
 
@@ -162,9 +169,7 @@ def process_fit_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     for col in cadence_cols:
         if col in df.columns:
-            print(f"步频转化前{df[col]}")
             df[col] = df[col].apply(cadence2)# 步频乘二
-            print(f"步频转化后{df[col]}")
 
     return df
 
@@ -191,32 +196,72 @@ def parse_all_fit_files(folder,data_type):
     return combined
 
 
+def parse_fit_file(filepath,data_type):
+    if data_type == "record":   # "record" ,"lap","session"
+        return parse_fit_file_record(filepath)
+    elif data_type == "lap":
+        return parse_fit_file_lap(filepath)
+    elif data_type == "session": 
+        return parse_fit_file_session(filepath)
+
+def output_file(data_type,df):
+    if not isinstance(df, pd.DataFrame):
+        print("❌ df 参数类型非pd.DataFrame")
+        return
+    
+    OUTPUT_FILE = f"./dataFrame/fit_{data_type}_data.xlsx"
+    if not df.empty:
+        # 去掉 timestamp 时区
+        datetime_cols = ["start_time", "timestamp", "start_sport_time", "end_sport_time"]
+        for col in datetime_cols:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col]).dt.tz_localize(None)
+
+        print(f"\n共解析 {len(df)} 条记录，包含字段数量：{len(df.columns)}")
+
+        # 字段替换为中文
+        df.rename(columns=CHINESE_COLUMNS, inplace=True)
+
+        if OUTPUT_FILE.endswith(".csv"):
+            df.to_csv(OUTPUT_FILE, index=False)
+        else:
+            df.to_excel(OUTPUT_FILE, index=False)
+
+        print(f"\n✅ 已导出到文件：{OUTPUT_FILE}")
+    else:
+        print("❗ 未生成任何数据。请检查 FIT 文件路径或内容。")
+
+
+def merge_by_source(df1, df2):
+    if not isinstance(df1, pd.DataFrame) or not isinstance(df2, pd.DataFrame):
+        raise TypeError("输入必须是 DataFrame")
+
+    # 去重列名
+    df1 = df1.loc[:, ~df1.columns.duplicated()]
+    df2 = df2.loc[:, ~df2.columns.duplicated()]
+
+    merged = pd.merge(df1, df2, on="source_file", how="inner", suffixes=("_1", "_2"))
+    print(f"✅ 合并完成，共 {len(merged)} 行")
+    return merged
 
 
 if __name__ == "__main__":
+    data_types = ["record" ,"lap","session"]
+    # data_types = ["lap"]
+    # print(f"{data_types[0]}")
+    df_all_data_type = {}
     for data_type in data_types:
-        
-        OUTPUT_FILE = f"./dataFrame/fit_{data_type}_data.xlsx"
-        print("=== 开始批量解析 FIT 文件 ===")
-        df_all = process_fit_dataframe(parse_all_fit_files(FIT_FOLDER,data_type))
+        # print(f"=== 开始批量解析 FIT 文件{data_type} ===")
+        df_all_data_type[data_type] = process_fit_dataframe(parse_all_fit_files(FIT_FOLDER,data_type))
 
-        if not df_all.empty:
-            # 去掉 timestamp 时区
-            datetime_cols = ["start_time", "timestamp", "start_sport_time", "end_sport_time"]
-            for col in datetime_cols:
-                if col in df_all.columns:
-                    df_all[col] = pd.to_datetime(df_all[col]).dt.tz_localize(None)
+    output_file("lap",df_all_data_type['lap'])
 
-            print(f"\n共解析 {len(df_all)} 条记录，包含字段数量：{len(df_all.columns)}")
 
-            # 字段替换为中文
-            df_all.rename(columns=CHINESE_COLUMNS, inplace=True)
+    df_all = pd.DataFrame()
+    df_all = merge_by_source(df_all_data_type["record"] , df_all_data_type["session"])
+    cols_to_front = ["source_file","start_sport_time","end_sport_time","total_elapsed_time","total_timer_time","total_distance","avg_speed","Effort Pace","avg_heart_rate","avg_running_cadence","avg_step_length","vertical_oscillation","stance_time","vertical_ratio","total_strides","total_calories","avg_power","max_speed","max_heart_rate","min_heart_rate","max_running_cadence","avg_temperature","total_ascent","total_descent","altitude","accumulated_power"]# 重新排序
+    df_all = process_columns(df_all,"",cols_to_front)
+    output_file("all",df_all)
 
-            if OUTPUT_FILE.endswith(".csv"):
-                df_all.to_csv(OUTPUT_FILE, index=False)
-            else:
-                df_all.to_excel(OUTPUT_FILE, index=False)
-
-            print(f"\n✅ 已导出到文件：{OUTPUT_FILE}")
-        else:
-            print("❗ 未生成任何数据。请检查 FIT 文件路径或内容。")
+    
+    
